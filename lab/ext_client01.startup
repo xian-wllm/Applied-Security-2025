@@ -1,0 +1,37 @@
+#!/bin/bash
+set -euo pipefail
+
+# lab IP
+ip -4 addr add 10.50.0.3/24 dev eth0 || true
+ip link set eth0 up
+
+# drop Docker’s default and set ours via the edge router
+ip route del default || true
+ip route add default via 10.50.0.1 dev eth0
+
+ip route replace default via 10.50.0.1 dev eth0 metric 10
+
+echo "nameserver 127.0.0.1" >> /etc/resolv.conf
+echo "10.50.10.2 guac.imovies.lan" >> /etc/hosts
+echo "10.50.10.2 portal.imovies.lan" >> /etc/hosts
+echo "10.50.10.2 pki.imovies.lan" >> /etc/hosts
+echo "10.50.10.2 kibana.imovies.lan" >> /etc/hosts
+
+service dnsmasq restart
+
+mkdir -p "$HOME/.pki/nssdb"
+
+# Initialize NSS DB
+certutil -d sql:"$HOME/.pki/nssdb" -N
+
+certutil -d sql:"$HOME/.pki/nssdb" \
+  -A \
+  -n "iMovies Root CA" \
+  -t "C,," \
+  -i /usr/local/share/ca-certificates/root_ca.crt
+
+pk12util -i /usr/local/share/ca-certificates/ms.imovies.lan.p12 \
+  -d sql:"$HOME/.pki/nssdb" \
+  -W "changeit"
+
+/var/ossec/bin/wazuh-control start

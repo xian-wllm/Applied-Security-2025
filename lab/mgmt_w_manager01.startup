@@ -1,0 +1,25 @@
+ip address add 10.50.40.10/24 dev eth0
+ip link set eth0 up
+ip route del default || true
+ip route add default via 10.50.40.1 dev eth0
+
+echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+
+echo $INDEXER_IP wazuh.indexer >> /etc/hosts
+echo $MANAGER_IP wazuh.manager >> /etc/hosts
+
+cp /shared/wazuh_indexer_ssl_certs/root-ca-manager.pem /etc/ssl/root-ca.pem
+cp /shared/wazuh_indexer_ssl_certs/wazuh.manager.pem /etc/ssl/filebeat.pem
+cp /shared/wazuh_indexer_ssl_certs/wazuh.manager-key.pem /etc/ssl/filebeat.key
+
+# # Create sysadmin user if not present
+# id sysadmin >/dev/null 2>&1 || useradd -m -s /bin/bash sysadmin
+
+# mkdir -p ~sysadmin/.ssh
+# chmod 700 ~sysadmin/.ssh
+
+# cat /shared/guacd/guac_sysadmin_ed25519.pub >> ~sysadmin/.ssh/authorized_keys
+
+# chown -R sysadmin:sysadmin ~sysadmin/.ssh
+# chmod 600 ~sysadmin/.ssh/authorized_keys
+# /etc/init.d/ssh start

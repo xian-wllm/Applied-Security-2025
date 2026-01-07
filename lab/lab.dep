@@ -1,0 +1,10 @@
+edge_router01: core_router01
+data_db01: core_router01
+mgmt_vault01: data_db01
+dmz_rp01: mgmt_vault01 edge_router01
+prod_web01: mgmt_vault01
+prod_w_dashboard01: mgmt_w_indexer01
+mgmt_w_indexer01: mgmt_w_manager01
+mgmt_w_manager01: core_router01
+mgmt_guac_guacd01: data_db01
+prod_guac_web01: mgmt_guac_guacd01

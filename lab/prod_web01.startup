@@ -1,0 +1,125 @@
+#!/bin/bash
+set -euo pipefail
+
+# -------- networking --------
+ip -4 addr add 10.50.20.2/24 dev eth0 || true
+ip link set eth0 up
+ip route add default via 10.50.20.1 || true
+
+# -------- host firewall --------
+iptables -F; iptables -X
+iptables -P INPUT DROP; iptables -P FORWARD DROP; iptables -P OUTPUT DROP
+
+# loopback + established
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A INPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# allow HTTP from DMZ reverse proxy only
+iptables -A INPUT -i eth0 -p tcp --dport 8000 -s 10.50.10.2 -j ACCEPT
+
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.40.2 --dport 1515 -j ACCEPT  # wazuh agent
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.40.2 --dport 1514 -j ACCEPT  # wazuh agent
+
+# outbound: Vault + DB + DNS (if needed)
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.40.2 --dport 8200 -j ACCEPT  # Vault
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.30.2 --dport 3306 -j ACCEPT  # MySQL
+# allow SSH from Guacamole guacd host (jump host)
+iptables -A INPUT -i eth0 -p tcp --dport 22 -s 10.50.40.20 -j ACCEPT
+
+iptables -A OUTPUT -o eth0 -p udp --dport 53 -j ACCEPT
+iptables -A OUTPUT -o eth0 -p tcp --dport 53 -j ACCEPT
+
+grep -q "vault.imovies.lan" /etc/hosts || echo "10.50.40.2 vault.imovies.lan" >> /etc/hosts
+
+mkdir -p /srv/app && chmod 755 /srv/app
+cp /shared/root_ca.crt /srv/app/ca.crt
+
+# -------- wait for Vault and DB --------
+VAULT="${VAULT_ADDR:-https://vault.imovies.lan:8200}"
+CA="${VAULT_CACERT:-/srv/app/ca.crt}"
+CURL_OPTS="-sS --fail"
+
+if [ -r "$CA" ]; then
+  CURL_OPTS="$CURL_OPTS --cacert $CA"
+fi
+
+echo "[portal] waiting for Vault API at $VAULT..."
+for i in $(seq 1 120); do
+  code=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' "$VAULT/v1/sys/health" || true)
+  if [ "$code" = "200" ] || [ "$code" = "472" ]; then
+    echo "[portal] Vault is up (status $code)."
+    break
+  fi
+  sleep 2
+done
+
+if ! curl $CURL_OPTS -o /dev/null "$VAULT/v1/sys/health"; then
+  echo "[portal] ERROR: Vault not reachable." >&2
+  exit 1
+fi
+
+# ------- unwrap or reuse AppRole SecretID --------
+ROLE_ID_FILE=/etc/role_id
+WRAPPED_FILE=/etc/secret_id_wrapped
+SID_FILE=/etc/secret_id
+
+if [ ! -s "$ROLE_ID_FILE" ]; then
+  echo "[portal] ERROR: missing $ROLE_ID_FILE from Vault provisioning." >&2
+  exit 1
+fi
+
+ROLE_ID="$(cat "$ROLE_ID_FILE")"
+
+if [ -s "$SID_FILE" ]; then
+  SECRET_ID="$(cat "$SID_FILE")"
+  echo "[portal] using existing SecretID from $SID_FILE"
+else
+  if [ ! -s "$WRAPPED_FILE" ]; then
+    echo "[portal] ERROR: no SecretID and no wrapped SecretID; rerun Vault provisioning." >&2
+    exit 1
+  fi
+  WRAPPED="$(cat "$WRAPPED_FILE")"
+  echo "[portal] unwrapping SecretID from Vault..."
+  SECRET_ID=""
+  for i in $(seq 1 20); do
+    SECRET_ID=$(curl $CURL_OPTS -X POST "$VAULT/v1/sys/wrapping/unwrap" \
+                 -H "X-Vault-Token: $WRAPPED" \
+                 | jq -er '.data.secret_id' 2>/dev/null) && break
+    sleep 2
+  done
+  [ -n "$SECRET_ID" ] || { echo "[portal] unwrap failed"; exit 1; }
+
+  umask 077
+  echo "$SECRET_ID" > "$SID_FILE"
+  shred -u "$WRAPPED_FILE" || true
+fi
+
+export APPROLE_ROLE_ID="$ROLE_ID"
+export APPROLE_SECRET_ID="$SECRET_ID"
+export VAULT_ADDR="$VAULT"
+export VAULT_CACERT="$CA"
+
+# ensure requests/curl also see the CA
+export CURL_CA_BUNDLE="$CA"
+export REQUESTS_CA_BUNDLE="$CA"
+
+/var/ossec/bin/wazuh-control start
+
+# -------- start the app --------
+cd /srv/app
+uvicorn portal_main:app --host 0.0.0.0 --port 8000 > /var/log/portal-imovies.log 2>&1 &
+
+# Create sysadmin user if not present
+id sysadmin >/dev/null 2>&1 || useradd -m -s /bin/bash sysadmin
+
+mkdir -p ~sysadmin/.ssh
+chmod 700 ~sysadmin/.ssh
+
+cat /shared/guacd/guac_sysadmin_ed25519.pub >> ~sysadmin/.ssh/authorized_keys
+
+chown -R sysadmin:sysadmin ~sysadmin/.ssh
+chmod 600 ~sysadmin/.ssh/authorized_keys
+
+/etc/init.d/ssh start

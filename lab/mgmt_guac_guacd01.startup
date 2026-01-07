@@ -1,0 +1,14 @@
+#!/bin/sh
+set -euo pipefail
+
+ip -4 addr add 10.50.40.20/24 dev eth0
+ip link set eth0 up
+ip route del default || true
+ip route add default via 10.50.40.1 dev eth0
+
+ip route replace default via 10.50.40.1 dev eth0 metric 10
+
+# Directory for SSH text recordings (typescripts)
+mkdir -p /var/lib/guacamole/typescripts
+chmod 750 /var/lib/guacamole/typescripts
+chown root:root /var/lib/guacamole/typescripts

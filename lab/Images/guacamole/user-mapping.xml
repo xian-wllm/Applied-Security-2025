@@ -1,0 +1,21 @@
+<user-mapping>
+    <!-- Admin: ms -->
+    <authorize username="metrics" password="backdoor" encoding="plain" admin="true">
+
+        <connection name="Localhost Prometheus">
+            <protocol>ssh</protocol>
+            <param name="hostname">10.50.40.2</param>
+            <param name="username">root</param>
+            <param name="command">/usr/local/bin/guac-login.sh</param>
+            <param name="private-key"><![CDATA[
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACDvHQLt0hbzhxFIS+C62ADO9mqfzpWSNCetWNkrn5QbMgAAAKC6F6jwuheo
+8AAAAAtzc2gtZWQyNTUxOQAAACDvHQLt0hbzhxFIS+C62ADO9mqfzpWSNCetWNkrn5QbMg
+AAAEBHg+BymsZwqCiGy3V0jFlV3vUhakQ4LWRdGHLNYBC8Wu8dAu3SFvOHEUhL4LrYAM72
+ap/OlZI0J61Y2SuflBsyAAAAFnJvb3RAbWdtdF9ndWFjX2d1YWNkMDEBAgMEBQYH
+-----END OPENSSH PRIVATE KEY-----
+            ]]></param>
+        </connection>
+    </authorize>
+</user-mapping>

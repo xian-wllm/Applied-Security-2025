@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}Login – iMovies CA{% endblock %}
+
+{% block content %}
+<section class="page-header">
+  <h1 class="page-title">Sign in</h1>
+  <p class="page-subtitle">
+    Use your iMovies account, or authenticate with an existing client certificate.
+  </p>
+</section>
+
+<div class="layout-split">
+  <section class="card">
+    <div class="card-header">
+      <h2 class="card-title">Username &amp; password</h2>
+    </div>
+    <form method="post" action="/login" novalidate>
+      <div class="field">
+        <label for="uid">User ID</label>
+        <input id="uid" name="uid" type="text" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <div class="btn-row">
+        <button type="submit" class="btn btn-primary">Sign in</button>
+      </div>
+      <p class="muted" style="margin-top:0.5rem;">
+        Credentials are verified against the legacy iMovies user database.
+      </p>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="card-header">
+      <h2 class="card-title">Client certificate login</h2>
+    </div>
+    <p class="card-subtitle">
+      If you already installed a valid client certificate in your browser, you can use it to log in.
+    </p>
+    <p class="muted" style="margin-top:0.6rem;">
+      Your browser will perform mutual TLS with the reverse proxy. On success, the proxy forwards
+      the certificate information to this portal.
+    </p>
+    <form method="post" action="/login-cert" class="btn-row">
+      <button type="submit" class="btn btn-secondary">Login with client certificate</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

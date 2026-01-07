@@ -1,0 +1,90 @@
+#!/bin/bash
+set -euo pipefail
+
+# start FRR
+/usr/lib/frr/frrinit.sh start
+
+echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+
+# ---------- firewall (iptables) ----------
+iptables -F
+iptables -X
+iptables -t nat -F
+iptables -t nat -X
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT DROP
+
+# loopback + established
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A INPUT   -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# icmp for troubleshooting
+iptables -A INPUT -p icmp -j ACCEPT
+iptables -A OUTPUT -p icmp -j ACCEPT
+
+# allow rp (10.50.10.2) to send traffic to the external net (10.50.0.0/24) via edge
+iptables -A FORWARD -i eth0 -o eth0 -s 10.50.10.2 -d 10.50.0.0/24 -j ACCEPT
+
+# allow SSH IN from Guacamole guacd (jump host)
+iptables -A INPUT -p tcp --dport 22 -s 10.50.40.20 -j ACCEPT
+
+# route ssh to other zones
+iptables -A FORWARD -i eth3 -o eth1 -s 10.50.40.20 -d 10.50.20.0/24 -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+iptables -A FORWARD -i eth3 -o eth2 -s 10.50.40.20 -d 10.50.30.0/24 -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+
+# ---------- dmz ↔ prod ----------
+# rp -> portal (http app, swap to 8443 when you enable internal TLS)
+iptables -A FORWARD -i eth0 -o eth1 -s 10.50.10.2 -d 10.50.20.2 -p tcp --dport 8000 -m conntrack --ctstate NEW -j ACCEPT
+iptables -A FORWARD -i eth0 -o eth1 -s 10.50.10.2 -d 10.50.20.11 -p tcp --dport 5601 -m conntrack --ctstate NEW -j ACCEPT
+iptables -A FORWARD -i eth0 -o eth1 -s 10.50.10.2 -d 10.50.20.20 -p tcp --dport 8080 -m conntrack --ctstate NEW -j ACCEPT
+# portal -> rp (for health if needed)
+iptables -A FORWARD -i eth1 -o eth0 -s 10.50.20.2 -d 10.50.10.2 -p tcp --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+
+# ---------- prod ↔ data ----------
+# portal -> mysql
+iptables -A FORWARD -i eth1 -o eth2 -s 10.50.20.2 -d 10.50.30.2 -p tcp --dport 3306 -m conntrack --ctstate NEW -j ACCEPT
+# guac -> mysql
+iptables -A FORWARD -i eth1 -o eth2 -s 10.50.20.20 -d 10.50.30.3 -p tcp --dport 3306 -m conntrack --ctstate NEW -j ACCEPT
+
+# ---------- dmz/prod ↔ mgmt (Vault only) ----------
+# rp -> vault (Vault Agent templates)
+iptables -A FORWARD -i eth0 -o eth3 -s 10.50.10.2 -d 10.50.40.2 -p tcp --dport 8200 -m conntrack --ctstate NEW -j ACCEPT
+# portal -> vault (AppRole, PKI, KV, Database)
+iptables -A FORWARD -i eth1 -o eth3 -s 10.50.20.2 -d 10.50.40.2 -p tcp --dport 8200 -m conntrack --ctstate NEW -j ACCEPT
+
+# mgmt → data: Vault → MySQL
+iptables -A FORWARD -s 10.50.40.2 -d 10.50.30.2 -p tcp --dport 3306 -m conntrack --ctstate NEW -j ACCEPT
+iptables -A FORWARD -s 10.50.40.4 -d 10.50.30.2 -p tcp --dport 3306 -m conntrack --ctstate NEW -j ACCEPT
+iptables -A FORWARD -s 10.50.30.2 -d 10.50.40.2 -p tcp --sport 3306 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+
+# prod → data: portal app → MySQL
+iptables -A FORWARD -s 10.50.20.2 -d 10.50.30.2 -p tcp --dport 3306 -m conntrack --ctstate NEW -j ACCEPT
+iptables -A FORWARD -s 10.50.30.2 -d 10.50.20.2 -p tcp --sport 3306 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+
+# ---------- all segments -> Wazuh manager (agent traffic) ----------
+# agents use 1514/TCP for events, 1515/TCP for enrollment by default
+for SRCNET in 10.50.0.0/24 10.50.10.0/24 10.50.20.0/24 10.50.30.0/24 10.50.40.0/24 10.60.60.0/24; do
+  iptables -A FORWARD -s $SRCNET -o eth3 -d 10.50.40.10 -p tcp --dport 1514 -m conntrack --ctstate NEW -j ACCEPT
+  iptables -A FORWARD -s $SRCNET -o eth3 -d 10.50.40.10 -p tcp --dport 1515 -m conntrack --ctstate NEW -j ACCEPT
+done
+
+# ---------- Wazuh dashboard -> manager API ----------
+iptables -A FORWARD -i eth1 -o eth3 -s 10.50.20.11 -d 10.50.40.10 -m conntrack --ctstate NEW -j ACCEPT
+iptables -A FORWARD -i eth1 -o eth3 -s 10.50.20.11 -d 10.50.40.11 -m conntrack --ctstate NEW -j ACCEPT
+
+# ---------- Guacamole -> Guacd ----------
+iptables -A FORWARD -i eth1 -o eth3 -s 10.50.20.20 -d 10.50.40.20 -p tcp --dport 4822 -m conntrack --ctstate NEW -j ACCEPT
+
+# Allow backup traffic from MGMT (backup_local01) to OFFSITE (backup_offsite01)
+iptables -A FORWARD -i eth3 -o eth4 -s 10.50.40.4 -d 10.60.60.2 -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+
+# vault metrics
+# iptables -A FORWARD -i eth4 -o eth3 -s 10.50.50.4 -d 10.50.40.2 -p tcp --dport 8200 -m conntrack --ctstate NEW -j ACCEPT
+
+WAZUH_MANAGER='10.50.40.10' WAZUH_AGENT_NAME=$HOSTNAME dpkg -i /shared/wazuh-agent_4.14.1-1_amd64.deb
+
+systemctl start wazuh-agent

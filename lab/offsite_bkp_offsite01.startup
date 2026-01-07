@@ -1,0 +1,43 @@
+#!/bin/bash
+set -euo pipefail
+
+# ---------- networking ----------
+ip -4 addr add 10.60.60.2/24 dev eth0 || true
+ip link set eth0 up
+ip route add default via 10.60.60.1 || true
+
+# ---------- firewall ----------
+iptables -F; iptables -X
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT DROP
+
+iptables -A INPUT  -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A INPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+iptables -A INPUT -i eth0 -p icmp -s 10.50.40.4 -j ACCEPT
+
+# SSH from backup_local01 only
+iptables -A INPUT -p tcp --dport 22 -s 10.50.40.4 -j ACCEPT
+
+# outbound DNS/HTTP(S) if needed
+iptables -A OUTPUT -p tcp --sport 22 -j ACCEPT
+iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 80 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
+
+mkdir -p /backup/repos
+chown -R backup:backup /backup
+
+mkhomedir_helper backup
+mkdir -p /home/backup/.ssh
+chown -R backup:backup /home/backup/.ssh
+chmod 700 /home/backup/.ssh
+
+cat /home/backup/.ssh/id_ed25519.pub > /home/backup/.ssh/authorized_keys
+
+systemctl start sshd
+systemctl start wazuh-agent

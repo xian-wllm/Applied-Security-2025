@@ -1,0 +1,97 @@
+#!/bin/sh
+set -eu
+
+# -------- networking --------
+ip -4 addr add 10.50.40.2/24 dev eth0 || true
+ip link set eth0 up
+ip route add default via 10.50.40.1 || true
+
+# -------- basic host firewall (deny by default) --------
+iptables -F
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT ACCEPT
+
+# allow established/related and loopback
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A INPUT -i lo -j ACCEPT
+
+# allow Vault HTTPS API on 8200
+iptables -A INPUT -p tcp --dport 8200 -j ACCEPT
+
+# allow SSH IN from Guacamole guacd (jump host)
+iptables -A INPUT -p tcp --dport 22 -s 10.50.40.20 -j ACCEPT
+
+echo "10.50.40.2 vault.imovies.lan"  >> /etc/hosts
+echo "10.50.10.2 pki.imovies.lan"  >> /etc/hosts
+
+# -------- environment for Vault CLI --------
+export VAULT_ADDR="https://vault.imovies.lan:8200"
+export VAULT_CACERT="/vault/userconfig/tls/ca.crt"
+
+# -------- start Vault server in background --------
+mkdir -p /var/log
+vault server -config=/vault/config/vault.hcl >/var/log/vault.log 2>&1 &
+
+# wait for API to come up
+health_check() {
+  curl --silent --show-error \
+       --cacert "$VAULT_CACERT" \
+       "$VAULT_ADDR/v1/sys/health" \
+       >/dev/null 2>&1
+}
+
+echo "[vault] waiting for HTTP health endpoint..."
+for i in $(seq 1 20); do
+  if health_check; then
+    echo "[vault] HTTP health endpoint reachable"
+    break
+  fi
+  sleep 1
+done
+
+if ! health_check; then
+  echo "[vault] ERROR: HTTP health endpoint not reachable at $VAULT_ADDR"
+  exit 1
+fi
+
+# -------- ensure Vault has been provisioned --------
+if [ "$(vault status -format=json | jq -r '.initialized')" != "true" ]; then
+  echo "[vault] ERROR: Vault not initialized."
+  chmod +x /shared/scripts/provision_vault.sh
+  /shared/scripts/provision_vault.sh
+  exit 1
+fi
+
+/var/ossec/bin/wazuh-control start
+
+# -------- unseal if needed --------
+SEALED=$(vault status -format=json | jq -r '.sealed')
+if [ "$SEALED" = "true" ]; then
+  UNSEAL_KEY_FILE=/vault/unseal_key
+  if [ ! -s "$UNSEAL_KEY_FILE" ]; then
+    echo "[vault] ERROR: missing unseal key at $UNSEAL_KEY_FILE" >&2
+    exit 1
+  fi
+  UNSEAL=$(cat "$UNSEAL_KEY_FILE")
+  vault operator unseal "$UNSEAL" >/dev/null
+  shred -u "$UNSEAL_KEY_FILE" || true
+fi
+
+echo "[vault] ready (initialized and unsealed)"
+
+# Create sysadmin user if not present
+id sysadmin >/dev/null 2>&1 || useradd -m -s /bin/bash sysadmin
+
+mkdir -p ~sysadmin/.ssh
+mkdir -p /root/.ssh
+chmod 700 ~sysadmin/.ssh
+chmod 700 /root/.ssh
+
+cat /shared/guacd/guac_sysadmin_ed25519.pub >> ~sysadmin/.ssh/authorized_keys
+cat /shared/guacd/guac_sysadmin_ed25519.pub >> /root/.ssh/authorized_keys
+
+chown -R sysadmin:sysadmin ~sysadmin/.ssh
+chmod 600 ~sysadmin/.ssh/authorized_keys
+
+/etc/init.d/ssh start

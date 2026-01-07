@@ -1,0 +1,65 @@
+#!/bin/bash
+set -euo pipefail
+
+# start FRR (uses configs under /etc/frr already present)
+/usr/lib/frr/frrinit.sh start
+
+# ---------- firewall (iptables) ----------
+# default drop, stateful allows
+iptables -F
+iptables -X
+iptables -t nat -F
+iptables -t nat -X
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT DROP
+
+# loopback + established
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A INPUT   -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# minimal router management (icmp)
+iptables -A INPUT -p icmp -j ACCEPT
+iptables -A OUTPUT -p icmp -j ACCEPT
+
+# ---------- internet -> dmz ----------
+# allow only https from internet to the reverse proxy in dmz
+iptables -I FORWARD 1 -i eth0 -o eth1 -p icmp -d 10.50.10.2 --icmp-type echo-request -m conntrack --ctstate NEW -j ACCEPT
+
+iptables -A FORWARD -i eth0 -o eth1 -p tcp -d 10.50.10.2 --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+iptables -I FORWARD 1 -i eth0 -o eth1 -p tcp -d 10.50.10.2 --dport 80 -m conntrack --ctstate NEW -j ACCEPT
+
+# allow SSH IN from Guacamole guacd (jump host)
+iptables -A INPUT -p tcp --dport 22 -s 10.50.40.20 -j ACCEPT
+
+# ---------- dmz -> internet (egress) ----------
+# allow only rp out for DNS/HTTP/HTTPS
+for SRC in 10.50.10.2; do
+  iptables -A FORWARD -i eth1 -o eth0 -s $SRC -p udp --dport 53  -m conntrack --ctstate NEW -j ACCEPT
+  iptables -A FORWARD -i eth1 -o eth0 -s $SRC -p tcp --dport 80  -m conntrack --ctstate NEW -j ACCEPT
+  iptables -A FORWARD -i eth1 -o eth0 -s $SRC -p tcp --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+done
+
+# forward dns requests from internal clients to dmz 
+iptables -A FORWARD -i eth0 -o eth1 -p udp --dport 53 -d 10.50.10.2 \
+  -m state --state NEW,ESTABLISHED -j ACCEPT
+iptables -A FORWARD -i eth0 -o eth1 -p tcp --dport 53 -d 10.50.10.2 \
+  -m state --state NEW,ESTABLISHED -j ACCEPT
+
+# Allow DNS replies from DMZ reverse proxy back to external net
+iptables -A FORWARD -i eth1 -o eth0 -p udp --sport 53 -s 10.50.10.2 \
+  -m state --state ESTABLISHED -j ACCEPT
+iptables -A FORWARD -i eth1 -o eth0 -p tcp --sport 53 -s 10.50.10.2 \
+  -m state --state ESTABLISHED -j ACCEPT
+
+# external clients (10.50.0.0/24) -> Wazuh manager via core
+iptables -A FORWARD -i eth0 -o eth1 -s 10.50.0.0/24 -d 10.50.40.10 -p tcp --dport 1514 -m conntrack --ctstate NEW -j ACCEPT
+iptables -A FORWARD -i eth0 -o eth1 -s 10.50.0.0/24 -d 10.50.40.10 -p tcp --dport 1515 -m conntrack --ctstate NEW -j ACCEPT
+
+# (no NAT required inside the lab; leave nat table empty)
+WAZUH_MANAGER='10.50.40.10' WAZUH_AGENT_NAME=$HOSTNAME dpkg -i /shared/wazuh-agent_4.14.1-1_amd64.deb
+
+systemctl start wazuh-agent

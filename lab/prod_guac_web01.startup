@@ -1,0 +1,27 @@
+#!/bin/sh
+set -euo pipefail
+
+echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+
+ip -4 addr add 10.50.20.20/24 dev eth0 || true
+ip link set eth0 up
+ip route del default || true
+ip route add default via 10.50.20.1 dev eth0
+
+ip route replace default via 10.50.20.1 dev eth0 metric 10
+
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.40.2 --dport 1515 -j ACCEPT  # wazuh agent
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.40.2 --dport 1514 -j ACCEPT  # wazuh agent
+
+# Create sysadmin user if not present
+id sysadmin >/dev/null 2>&1 || useradd -m -s /bin/bash sysadmin
+
+mkdir -p ~sysadmin/.ssh
+chmod 700 ~sysadmin/.ssh
+
+cat /shared/guacd/guac_sysadmin_ed25519.pub >> ~sysadmin/.ssh/authorized_keys
+
+chown -R sysadmin:sysadmin ~sysadmin/.ssh
+chmod 600 ~sysadmin/.ssh/authorized_keys
+
+/var/ossec/bin/wazuh-control start

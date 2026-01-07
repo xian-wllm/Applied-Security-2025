@@ -1,0 +1,85 @@
+#!/bin/bash
+set -euo pipefail
+
+# ---------- networking ----------
+ip -4 addr add 10.50.40.4/24 dev eth0 || true
+ip link set eth0 up
+ip route add default via 10.50.40.1 || true
+
+# ---------- firewall (default DROP) ----------
+iptables -F
+iptables -X
+iptables -t nat -F
+iptables -t nat -X
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT DROP
+
+# loopback + established
+iptables -A INPUT  -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A INPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+iptables -A INPUT -i eth0 -p icmp -s 10.50.40.4 -j ACCEPT
+
+# IN: SSH from mgmt net (for you / Guac / etc)
+iptables -A INPUT -i eth0 -p tcp --dport 22 -s 10.50.40.0/24 -j ACCEPT
+
+# OUT: SSH to Vault, DBs, portal
+iptables -A OUTPUT -o eth0 -p tcp --dport 22 -d 10.50.40.2 -j ACCEPT  # mgmt_vault01
+iptables -A OUTPUT -o eth0 -p tcp --dport 22 -d 10.50.30.2 -j ACCEPT  # data_db01
+iptables -A OUTPUT -o eth0 -p tcp --dport 22 -d 10.50.30.3 -j ACCEPT  # data_db02
+iptables -A OUTPUT -o eth0 -p tcp --dport 22 -d 10.50.20.2 -j ACCEPT  # prod_web01
+
+# OUT: to offsite backup
+iptables -A OUTPUT -o eth0 -p tcp -d 10.60.60.2 --dport 22 -j ACCEPT  # offsite_bkp_offsite01 via core_router01
+
+# OUT: wazuh manager
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.40.10 --dport 1514 -j ACCEPT
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.40.10 --dport 1515 -j ACCEPT
+
+# vault
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.40.2 --dport 8200 -j ACCEPT
+
+# mysql
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.30.2 --dport 3306 -j ACCEPT
+
+chmod +x /usr/local/bin/run_backups.sh
+chmod +x /usr/local/bin/sync_offsite.sh
+
+cp /shared/root_ca.crt /usr/local/share/ca-certificates/vault-ca.crt
+update-ca-certificates
+
+# backup user
+mkhomedir_helper backup
+mkdir -p /home/backup/.ssh
+chown -R backup:backup /home/backup/.ssh
+chmod 700 /home/backup/.ssh
+
+# ensure local Borg repo root
+mkdir -p /backup/repos /backup/tmp
+chown -R backup:backup /backup
+
+# sysadmin user (already used elsewhere in your lab)
+id sysadmin >/dev/null 2>&1 || useradd -m -s /bin/bash sysadmin
+
+mkdir -p ~sysadmin/.ssh
+chmod 700 ~sysadmin/.ssh
+
+# Guac sysadmin key is already in /shared/guacd
+if [ -r /shared/guacd/guac_sysadmin_ed25519.pub ]; then
+  cat /shared/guacd/guac_sysadmin_ed25519.pub >> ~sysadmin/.ssh/authorized_keys
+  chown -R sysadmin:sysadmin ~sysadmin/.ssh
+  chmod 600 ~sysadmin/.ssh/authorized_keys
+fi
+
+# ---------- services ----------
+# sshd
+systemctl start sshd
+
+# cron
+systemctl start cron
+
+# wazuh-agent
+systemctl start wazuh-agent

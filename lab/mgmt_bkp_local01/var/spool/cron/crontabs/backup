@@ -1,0 +1,7 @@
+# m h dom mon dow  command
+
+# Nightly backups at 02:00
+0 2 * * * /usr/local/bin/run_backups.sh
+
+# Nightly offsite sync at 03:00
+0 3 * * * /usr/local/bin/sync_offsite.sh

@@ -1,0 +1,12 @@
+FROM wazuh/wazuh-dashboard:4.14.1
+
+USER root 
+
+RUN dnf install -y \
+      bash \
+      iproute \
+      iptables \
+      ca-certificates \
+      openssh-server
+
+ENTRYPOINT [ "/bin/bash" ]

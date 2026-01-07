@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+
+{% block title %}Certificates - iMovies CA{% endblock %}
+
+{% block content %}
+<section class="page-header">
+  <h1 class="page-title">Your certificates</h1>
+  <p class="page-subtitle">
+    Issue new client certificates and revoke existing ones for your iMovies account.
+  </p>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2 class="card-title">Issue a new certificate</h2>
+  </div>
+  <p class="card-subtitle">
+    A new certificate will be created using your current profile data (name and e-mail) and
+    provided for download in PKCS#12 format.
+  </p>
+
+  <form method="post" action="/enroll" class="form-vertical">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <div class="form-group">
+      <label for="cert_role">Certificate role</label>
+
+      {% if available_roles and available_roles|length > 1 %}
+        <select id="cert_role" name="cert_role" class="input">
+          {% for r in available_roles %}
+            <option value="{{ r }}"{% if r == default_role %} selected{% endif %}>
+              {% if r == "employee" %}
+                Employee (standard user)
+              {% elif r == "ca_admin" %}
+                CA Administrator
+              {% elif r == "sys_admin" %}
+                System Administrator
+              {% else %}
+                {{ r }}
+              {% endif %}
+            </option>
+          {% endfor %}
+        </select>
+        <small class="muted">
+          Choose which role this certificate should represent. You can hold multiple certificates
+          for different roles.
+        </small>
+      {% elif available_roles and available_roles|length == 1 %}
+        {# Only one role: show it as text and use hidden field #}
+        {% set only_role = available_roles[0] %}
+        <p class="muted" style="margin-bottom:0.25rem;">
+          This certificate will be issued for role:
+          <strong>
+            {% if only_role == "employee" %}
+              Employee (standard user)
+            {% elif only_role == "ca_admin" %}
+              CA Administrator
+            {% elif only_role == "sys_admin" %}
+              System Administrator
+            {% else %}
+              {{ only_role }}
+            {% endif %}
+          </strong>
+        </p>
+        <input type="hidden" name="cert_role" value="{{ only_role }}">
+      {% else %}
+        <p class="muted">
+          No roles are assigned to your account. Please contact an administrator.
+        </p>
+      {% endif %}
+    </div>
+
+    <div class="form-group">
+      <label for="p12_password">PKCS#12 password</label>
+      <input
+        type="password"
+        id="p12_password"
+        name="p12_password"
+        autocomplete="new-password"
+        placeholder="Choose a password for the .p12 file"
+        class="input"
+      >
+      <small class="muted">
+        This password protects your downloaded certificate file. It is not stored on the server.
+        Leave empty to use the system default.
+      </small>
+    </div>
+
+    <div class="form-group">
+      <label for="p12_password_confirm">Confirm PKCS#12 password</label>
+      <input
+        type="password"
+        id="p12_password_confirm"
+        name="p12_password_confirm"
+        autocomplete="new-password"
+        placeholder="Repeat the password"
+        class="input"
+      >
+    </div>
+
+    <button type="submit" class="btn btn-primary"
+            {% if not available_roles or available_roles|length == 0 %}disabled{% endif %}>
+      Issue new certificate
+    </button>
+  </form>
+
+  <p class="muted" style="margin-top:0.6rem;">
+    After download, install the PKCS#12 file in your browser or mail client to use the certificate.
+  </p>
+</section>
+
+<section class="card" style="margin-top:1.25rem;">
+  <div class="card-header">
+    <h2 class="card-title">Issued certificates</h2>
+    {% if certs and certs|length > 0 %}
+      <span class="muted">{{ certs|length }} total</span>
+    {% endif %}
+  </div>
+
+  {% if not certs or certs|length == 0 %}
+    <p class="muted">
+      You don't have any certificates yet. Use “Issue new certificate” above to request one.
+    </p>
+  {% else %}
+    <div class="cert-list">
+      {% for c in certs %}
+        <article class="cert-card{% if c.is_revoked %} cert-card--revoked{% endif %}">
+          <div class="card-header" style="margin-bottom:0.4rem;">
+            <h3 class="card-title" style="font-size:1rem;">
+              {{ c.cn or "Client certificate" }}
+            </h3>
+            <span class="cert-status-pill
+              {% if c.status_code == 'active' %}cert-status-pill--active{% endif %}
+              {% if c.status_code == 'revoked' %}cert-status-pill--revoked{% endif %}
+              {% if c.status_code == 'expiring' %}cert-status-pill--expiring{% endif %}
+            ">
+              {{ c.status }}
+            </span>
+          </div>
+
+          <dl class="cert-meta">
+            <div>
+              <dt>Issued to</dt>
+              <dd>{{ c.subject_display }}</dd>
+            </div>
+            <div>
+              <dt>Certificate role</dt>
+              <dd>{{ c.role_label }}</dd>
+            </div>
+            <div>
+              <dt>OU</dt>
+              <dd>{{ c.ou or "n/a" }}</dd>
+            </div>
+            <div>
+              <dt>Valid from</dt>
+              <dd>{{ c.not_before }}</dd>
+            </div>
+            <div>
+              <dt>Valid until</dt>
+              <dd>{{ c.not_after }}</dd>
+            </div>
+            <div>
+              <dt>Time remaining</dt>
+              <dd>{{ c.time_remaining }}</dd>
+            </div>
+            <div>
+              <dt>Serial</dt>
+              <dd><code>{{ c.serial_short }}</code></dd>
+            </div>
+          </dl>
+
+          <div class="cert-footer">
+            <div class="btn-row">
+              <form method="post" action="/revoke" class="inline-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="serial" value="{{ c.serial }}">
+                <button
+                  type="submit"
+                  class="btn btn-danger"
+                  {% if c.is_revoked %}disabled{% endif %}
+                >
+                  Revoke
+                </button>
+              </form>
+            </div>
+
+            <details>
+              <summary>More details</summary>
+              <dl class="cert-meta" style="margin-top:0.4rem;">
+                <div>
+                  <dt>Full serial</dt>
+                  <dd><code>{{ c.serial }}</code></dd>
+                </div>
+                <div>
+                  <dt>Role (raw)</dt>
+                  <dd>{{ c.role or "n/a" }}</dd>
+                </div>
+                <div>
+                  <dt>OU (from certificate)</dt>
+                  <dd>{{ c.ou or "n/a" }}</dd>
+                </div>
+                {% if c.issuing_role %}
+                  <div>
+                    <dt>Vault PKI role</dt>
+                    <dd>{{ c.issuing_role }}</dd>
+                  </div>
+                {% endif %}
+                {% if c.revoked_at %}
+                  <div>
+                    <dt>Revoked at</dt>
+                    <dd>{{ c.revoked_at }}</dd>
+                  </div>
+                {% endif %}
+              </dl>
+            </details>
+          </div>
+        </article>
+      {% endfor %}
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

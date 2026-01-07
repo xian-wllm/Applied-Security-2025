@@ -1,0 +1,30 @@
+ip -4 addr add 10.50.40.11/24 dev eth0
+ip link set eth0 up
+ip route del default || true
+ip route add default via 10.50.40.1 dev eth0
+
+echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+
+mkdir -p /usr/share/wazuh-indexer/config/certs 
+cp -p /shared/wazuh_indexer_ssl_certs/root-ca.pem /usr/share/wazuh-indexer/config/certs/root-ca.pem
+cp -p /shared/wazuh_indexer_ssl_certs/wazuh.indexer-key.pem /usr/share/wazuh-indexer/config/certs/wazuh.indexer.key
+cp -p /shared/wazuh_indexer_ssl_certs/wazuh.indexer.pem /usr/share/wazuh-indexer/config/certs/wazuh.indexer.pem
+cp /shared/wazuh_indexer_ssl_certs/admin.pem /usr/share/wazuh-indexer/config/certs/admin.pem
+cp /shared/wazuh_indexer_ssl_certs/admin-key.pem /usr/share/wazuh-indexer/config/certs/admin-key.pem
+cp /shared/wazuh_indexer/wazuh.indexer.yml /usr/share/wazuh-indexer/config/opensearch.yml
+cp /shared/wazuh_indexer/internal_users.yml /usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+
+echo $INDEXER_IP wazuh.indexer >> /etc/hosts
+echo $MANAGER_IP wazuh.manager >> /etc/hosts
+
+# # Create sysadmin user if not present
+# id sysadmin >/dev/null 2>&1 || useradd -m -s /bin/bash sysadmin
+
+# mkdir -p ~sysadmin/.ssh
+# chmod 700 ~sysadmin/.ssh
+
+# cat /shared/guacd/guac_sysadmin_ed25519.pub >> ~sysadmin/.ssh/authorized_keys
+
+# chown -R sysadmin:sysadmin ~sysadmin/.ssh
+# chmod 600 ~sysadmin/.ssh/authorized_keys
+# /etc/init.d/ssh start

@@ -1,0 +1,147 @@
+#!/bin/bash
+set -euo pipefail
+
+# -------- networking --------
+ip -4 addr add 10.50.10.2/24 dev eth0 || true
+ip link set eth0 up
+ip route add default via 10.50.10.254 || true
+
+# -------- host firewall --------
+iptables -F; iptables -X
+iptables -P INPUT DROP; iptables -P FORWARD DROP; iptables -P OUTPUT DROP
+
+# loopback + established
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A INPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# inbound HTTP/HTTPS from Internet
+iptables -A INPUT -i eth0 -p udp --dport 53  -j ACCEPT
+iptables -A INPUT -i eth0 -p tcp --dport 53  -j ACCEPT
+iptables -A INPUT -i eth0 -p tcp --dport 80  -j ACCEPT
+iptables -A INPUT -i eth0 -p tcp --dport 443 -j ACCEPT
+iptables -A INPUT -p icmp -j ACCEPT
+
+# allow SSH IN from Guacamole guacd (jump host)
+iptables -A INPUT -p tcp --dport 22 -s 10.50.40.20 -j ACCEPT
+
+# outbound: portal + Vault + DNS
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.20.11 --dport 5601 -j ACCEPT  # wazuh dashboard
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.40.2 --dport 1515 -j ACCEPT  # wazuh agent
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.40.2 --dport 1514 -j ACCEPT  # wazuh agent
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.20.2 --dport 8000 -j ACCEPT  # vault
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.20.20 --dport 8080 -j ACCEPT  # portal
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.40.2 --dport 8200 -j ACCEPT  # Vault
+iptables -A OUTPUT -o eth0 -p tcp -d 10.50.40.2 --dport 443 -j ACCEPT  # Vault
+iptables -A OUTPUT -o eth0 -p udp --dport 53 -j ACCEPT
+iptables -A OUTPUT -o eth0 -p tcp --dport 53 -j ACCEPT
+
+echo "10.50.10.2 kibana.imovies.lan" >> /etc/hosts
+echo "10.50.10.2 guac.imovies.lan" >> /etc/hosts
+echo "10.50.40.2 vault.imovies.lan" >> /etc/hosts
+echo "10.50.10.2 portal.imovies.lan" >> /etc/hosts
+echo "10.50.10.2 pki.imovies.lan"    >> /etc/hosts
+
+# -------- prepare cert dirs --------
+mkdir -p /var/log
+mkdir -p /etc/nginx/certs
+mkdir -p /vault/userconfig/tls
+mkdir -p /etc/nginx/tls /run/vault-agent
+
+cp /shared/root_ca.crt /vault/userconfig/tls/ca.crt
+cp /shared/root_ca.crt /etc/nginx/tls/root_ca.crt
+
+VAULT="https://vault.imovies.lan:8200"
+CA="/vault/userconfig/tls/ca.crt"
+export VAULT_ADDR="$VAULT"
+export VAULT_CACERT="$CA"
+export CURL_CA_BUNDLE="$CA"
+
+# -------- wait for Vault --------
+CURL_OPTS="-sS --fail"
+
+if [ -r "$CA" ]; then
+  CURL_OPTS="$CURL_OPTS --cacert $CA"
+fi
+
+echo "[portal] waiting for Vault API at $VAULT..."
+for i in $(seq 1 120); do
+  code=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' "$VAULT/v1/sys/health" || true)
+  if [ "$code" = "200" ] || [ "$code" = "472" ]; then
+    echo "[portal] Vault is up (status $code)."
+    break
+  fi
+  sleep 2
+done
+
+if ! curl $CURL_OPTS -o /dev/null "$VAULT/v1/sys/health"; then
+  echo "[portal] ERROR: Vault not reachable." >&2
+  exit 1
+fi
+
+# ------- unwrap or reuse AppRole SecretID --------
+ROLE_ID_FILE=/etc/vault-agent/role_id
+WRAPPED_FILE=/etc/vault-agent/secret_id_wrapped
+SID_FILE=/etc/vault-agent/secret_id
+
+if [ ! -s "$ROLE_ID_FILE" ]; then
+  echo "[portal] ERROR: missing $ROLE_ID_FILE from Vault provisioning." >&2
+  exit 1
+fi
+
+ROLE_ID="$(cat "$ROLE_ID_FILE")"
+
+if [ -s "$SID_FILE" ]; then
+  SECRET_ID="$(cat "$SID_FILE")"
+  echo "[portal] using existing SecretID from $SID_FILE"
+else
+  if [ ! -s "$WRAPPED_FILE" ]; then
+    echo "[portal] ERROR: no SecretID and no wrapped SecretID; rerun Vault provisioning." >&2
+    exit 1
+  fi
+  WRAPPED="$(cat "$WRAPPED_FILE")"
+  echo "[portal] unwrapping SecretID from Vault..."
+  SECRET_ID=""
+  for i in $(seq 1 20); do
+    SECRET_ID=$(curl $CURL_OPTS -X POST "$VAULT/v1/sys/wrapping/unwrap" \
+                 -H "X-Vault-Token: $WRAPPED" \
+                 | jq -er '.data.secret_id' 2>/dev/null) && break
+    sleep 2
+  done
+  [ -n "$SECRET_ID" ] || { echo "[portal] unwrap failed"; exit 1; }
+
+  umask 077
+  echo "$SECRET_ID" > "$SID_FILE"
+  shred -u "$WRAPPED_FILE" || true
+fi
+
+# -------- run vault agent --------
+vault agent -config=/etc/vault-agent/vault-agent.hcl >/var/log/vault_agent.log 2>&1 &
+
+# wait for rendered certs
+for f in /etc/nginx/tls/rp_server.crt /etc/nginx/tls/rp_vault_client.crt; do
+  for i in $(seq 1 60); do
+    [ -s "$f" ] && break || sleep 1
+  done
+  [ -s "$f" ] || { echo "[rp] ERROR: $f not rendered by Vault agent"; exit 1; }
+done
+
+# -------- start nginx --------
+sleep 5
+
+mkdir -p /etc/nginx/conf.d
+service nginx start
+
+# Create sysadmin user if not present
+id sysadmin >/dev/null 2>&1 || useradd -m -s /bin/bash sysadmin
+
+mkdir -p ~sysadmin/.ssh
+chmod 700 ~sysadmin/.ssh
+
+cat /shared/guacd/guac_sysadmin_ed25519.pub >> ~sysadmin/.ssh/authorized_keys
+
+chown -R sysadmin:sysadmin ~sysadmin/.ssh
+chmod 600 ~sysadmin/.ssh/authorized_keys
+
+/var/ossec/bin/wazuh-control start

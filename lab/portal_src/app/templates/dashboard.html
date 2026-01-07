@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}CA Dashboard - iMovies CA{% endblock %}
+
+{% block content %}
+<section class="page-header">
+  <h1 class="page-title">CA administrator dashboard</h1>
+  <p class="page-subtitle">
+    Overview of certificate authority state (mTLS-protected).
+  </p>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2 class="card-title">Statistics</h2>
+  </div>
+  <dl class="cert-meta">
+    <div>
+      <dt>Total issued</dt>
+      <dd>{{ tot_issued }}</dd>
+    </div>
+    <div>
+      <dt>Total revoked</dt>
+      <dd>{{ tot_revoked }}</dd>
+    </div>
+    <div>
+      <dt>Last serial</dt>
+      <dd><code>{{ last_serial }}</code></dd>
+    </div>
+  </dl>
+  <p class="muted" style="margin-top:0.6rem;">
+    Access to this interface requires a valid CA administrator certificate. All
+    accesses should be logged by the portal and by Vault / the CA where applicable.
+  </p>
+</section>
+{% endblock %}

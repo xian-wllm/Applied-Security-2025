@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}iMovies CA - Home{% endblock %}
+
+{% block content %}
+<section class="page-header">
+  <h1 class="page-title">Welcome to the iMovies Certificate Authority</h1>
+  <p class="page-subtitle">
+    Request, download, and manage your personal certificates for iMovies.
+  </p>
+</section>
+
+<div class="card">
+    <div class="card-header">
+      <h2 class="card-title">Get started</h2>
+    </div>
+    <p class="card-subtitle">
+      Use your existing iMovies account to obtain a client certificate for signing and encrypting e-mails.
+    </p>
+    <div class="btn-row">
+      {% if current_user %}
+        <a href="/enroll" class="btn btn-primary">Manage certificates</a>
+        <a href="/profile" class="btn btn-secondary">Update profile data</a>
+      {% else %}
+        <a href="/login" class="btn btn-primary">Login to request a certificate</a>
+      {% endif %}
+    </div>
+    <p class="muted" style="margin-top:0.75rem;">
+      Certificates are issued based on your profile information (name and e-mail address) stored in the
+      legacy database and kept in sync here.
+    </p>
+</div>
+{% endblock %}
